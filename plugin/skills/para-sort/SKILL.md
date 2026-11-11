@@ -8,14 +8,14 @@ description: 지난 AI 대화에서 주운 끝난 일(PARA 인박스)을 판정�
 스크립트는 줍고 · 보여 주고 · 쓰기만 한다. **기록할지 · 어디로 · 어떻게 쪼갤지는 네가 판단한다.** 키나 별도 LLM 호출은 없다.
 
 ```bash
-P="python3 ${MILLIE_HOME:-$HOME/.millie-obsidian}/para"
-$P/collect.py --no-llm            # 1. 지난 대화에서 끝난 일을 줍는다 (빠름, LLM 없음)
-$P/classify.py --pending --claim  # 2. 정리할 목록 + 잠금. "대기 없음" · "다른 대화가 정리 중" 이면 거기서 끝
-#                                   3. 아래 기준으로 판정 JSON 을 파일에 쓴다 (예: /tmp/para-verdict.json)
-$P/classify.py --apply /tmp/para-verdict.json   # 4. 적용 — 마지막 줄을 그대로 한 줄 보고
+P="${MILLIE_HOME:-$HOME/.millie-obsidian}/para"   # 경로만 담는다 — zsh 는 변수 안 공백으로 단어를 나누지 않는다
+python3 "$P/collect.py" --no-llm            # 1. 지난 대화에서 끝난 일을 줍는다 (빠름, LLM 없음)
+python3 "$P/classify.py" --pending --claim  # 2. 정리할 목록 + 잠금. "대기 없음" · "다른 대화가 정리 중" 이면 거기서 끝
+#                                             3. 아래 기준으로 판정 JSON 을 파일에 쓴다 (예: /tmp/para-verdict.json)
+python3 "$P/classify.py" --apply /tmp/para-verdict.json   # 4. 적용 — 마지막 줄을 그대로 한 줄 보고
 ```
 
-판정 도중 멈추게 되면 `$P/classify.py --release` 로 잠금을 푼다(30분 지나면 저절로 풀린다).
+판정 도중 멈추게 되면 `python3 "$P/classify.py" --release` 로 잠금을 푼다(30분 지나면 저절로 풀린다).
 
 ## 판정 JSON
 
