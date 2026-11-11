@@ -216,7 +216,8 @@ def cmd_devlog(a):
 
 # ── todo ───────────────────────────────────────────────────
 # 할 일은 받을 때 중요도 · 마감 · 난이도를 정한다. 이 값으로 plugin/tools/todo-pile 이 바탕화면에 쌓는다.
-#   - [ ] 🔸 [프로젝트] 내용 · ❗상 · 📅 2026-10-20
+#   - [ ] 🔸 [프로젝트] 제목 · ❗상 · 📅 2026-10-20
+#     내용(선택) — 이 줄 아래에 두 칸 들여쓴 줄들. todo-pile 이 Claude 로 해결할 때 같이 넘긴다.
 IMPORTANCE = ["상", "중", "하"]
 EFFORT = ["⚡", "🔸", "🧱"]
 
@@ -245,8 +246,14 @@ def today_todo_file(vault, paths):
     if prev:
         src = prev[-1]
         mmdd = datetime.date.fromisoformat(src.stem).strftime("%m-%d")
+        carrying = False                               # 직전 할 일이 미완료일 때만 그 아래 들여쓴 내용 줄을 따라 보낸다
         for l in src.read_text(encoding="utf-8").split("\n"):
-            if l.startswith("- [ ] "):
+            if l.startswith(("  ", "\t")):
+                if carrying and l.strip():
+                    carried.append(l.rstrip())
+                continue
+            carrying = l.startswith("- [ ] ")
+            if carrying:
                 body = l[6:]
                 carried.append("- [ ] " + (body if body.startswith("⏭") else "⏭ %s %s" % (mmdd, body)))
     atomic_write(f, TODO_HEAD.format(d=today.isoformat()) + "".join(c + "\n" for c in carried))
@@ -290,7 +297,8 @@ def cmd_todo(a):
     while j < len(lines) and not lines[j].startswith("## "):
         j += 1
     last = max((k for k in range(i + 1, j) if lines[k].strip()), default=i)
-    lines.insert(last + 1, line)
+    body_lines = ["  " + c for c in (clean(x) for x in (a.body or "").splitlines()) if c]   # 내용 — 빈 줄은 버린다
+    lines[last + 1:last + 1] = [line] + body_lines
     atomic_write(f, "\n".join(lines))
     print("할 일 %s ▸ %s ▸ 중요도 %s · 마감 %s · %s" % (project, f.name, a.importance or "-", due.isoformat() if due else "-", a.effort))
 
@@ -635,6 +643,7 @@ def main(argv=None):
     s = sub.add_parser("todo"); s.add_argument("--project", required=True); s.add_argument("--text", required=True)
     s.add_argument("--importance"); s.add_argument("--due"); s.add_argument("--effort")
     s.add_argument("--background", action="store_true", help="뒤에서 정리할 때만 — 중요도·마감 없이 넣는다")
+    s.add_argument("--body", default="", help="내용(여러 줄) — 할 일 줄 아래에 두 칸 들여써서 붙는다")
     s.set_defaults(fn=cmd_todo)
     s = sub.add_parser("issue"); s.add_argument("--project", required=True); s.add_argument("--section", default="프로젝트 이슈")
     s.add_argument("--text", required=True); s.set_defaults(fn=cmd_issue)

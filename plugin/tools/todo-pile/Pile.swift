@@ -69,6 +69,7 @@ struct Item {
     let importance: String?
     let due: Date?
     let postponed: Int
+    var body: String = ""          // 내용 — 할 일 줄 바로 아래 들여쓴 줄들 (없으면 빈 문자열)
     var jiraKey: String? = nil     // Jira 이슈면 키 (ABC-123)
     var status: String? = nil      // Jira 상태 (진행 중 …)
     var assignee: String? = nil    // Jira 담당자 이름 (나 말고 다른 사람 이슈일 때 카드에 보인다)
@@ -105,8 +106,26 @@ func loadItems() -> [Item] {
     guard let f = latestTodoFile(), let text = try? String(contentsOfFile: f, encoding: .utf8) else { return [] }
     let stem = ((f as NSString).lastPathComponent as NSString).deletingPathExtension
     let fd = iso.date(from: stem) ?? today()
-    return text.components(separatedBy: "\n").compactMap { parseLine($0, fileDate: fd) }
+    let lines = text.components(separatedBy: "\n")
+    var out: [Item] = []
+    for (i, l) in lines.enumerated() {
+        guard var it = parseLine(l, fileDate: fd) else { continue }
+        // 내용 = 할 일 줄 바로 아래 들여쓴(공백 · 탭) 줄들. 들여쓰지 않은 줄이 나오면 거기서 끝.
+        var body: [String] = []
+        var j = i + 1
+        while j < lines.count, lines[j].hasPrefix("  ") || lines[j].hasPrefix("\t") {
+            let t = lines[j].trimmingCharacters(in: .whitespaces)
+            if !t.isEmpty { body.append(t) }
+            j += 1
+        }
+        it.body = body.joined(separator: "\n")
+        out.append(it)
+    }
+    return out
 }
+
+/// 할 일 본문 + 내용 — Claude 에게 넘기는 프롬프트용.
+func bodyBlock(_ it: Item) -> String { it.body.isEmpty ? "" : "\n내용:\n" + it.body }
 
 // ── 압박 ────────────────────────────────────────────────────
 /// 클수록 급하다. 중요도 + 묵은 날(주 단위) + 마감(지남이면 하루마다 2) + 미룬 횟수.
@@ -192,6 +211,13 @@ func vaultProjects() -> [String] {
         .filter { var d: ObjCBool = false; return FileManager.default.fileExists(atPath: dir + "/" + $0, isDirectory: &d) && d.boolValue && !$0.hasPrefix(".") }
         .map { $0.replacingOccurrences(of: #"^\d+\.\s*"#, with: "", options: .regularExpression) }.sorted()
 }
+
+/// `1. Projects` 안의 진행 중 프로젝트 이름 — Store · Archives 로 간 건 폴더가 없어 빠진다.
+/// `00. 미분류` · `01. Daily` 같은 번호 붙은 칸도 번호를 뗀 이름(`미분류` · `Daily`)으로 넣는다 — 할 일 추가 창(vaultProjects)이 이 이름으로 고르게 하므로 거르면 쓴 할 일이 안 보인다.
+func activeProjects() -> Set<String> { Set(vaultProjects()) }
+
+/// 리뷰 요청 PR 줄(`PR 저장소#번호 …`, vault/.scripts/pr_todo_sync.py 가 쌓는다) — 프로젝트 칸이 브랜치 이름이라 진행 중 프로젝트 거름에서 뺀다.
+func isPRItem(_ it: Item) -> Bool { it.text.range(of: #"^PR \S+#\d+(\s|$)"#, options: .regularExpression) != nil }
 
 // ── Jira (나한테 할당된 미완료 이슈) ─────────────────────────
 // 토큰은 키체인(서비스 todo-pile-jira, 계정 = 이메일), 사이트·이메일은 설정 파일. 마지막 결과는 state/jira-cache.json
@@ -374,11 +400,16 @@ func makeSpec(_ it: Item, echo: Int, k: CGFloat, color: NSColor) -> Spec {
                 title: it.text, sub: sub, font: f, textW: max(ts.width, 1), badge: badge, badgeTone: tone)
 }
 
-/// 도구 블록 — 늘 쌓여 있는 "＋ 할 일 쓰기" · "🎙 회의하기". 클릭하면 바로 그 창이 뜬다.
-let toolKinds = ["tool:todo", "tool:meeting"]
+/// 도구 블록 — 늘 쌓여 있는 "＋ 할 일 쓰기" · "🎙 회의하기" · "🔄 새로고침". 클릭하면 바로 그 창이 뜨거나(새로고침은 바로 실행) 한다.
+let toolKinds = ["tool:todo", "tool:meeting", "tool:reload"]
 func makeToolSpec(_ kind: String, k: CGFloat) -> Spec {
     let f = max(22, 26 * k)                  // 늘 눈에 띄게 — 화면이 차서 작아져도 이만큼은
-    let (title, sub) = kind == "tool:todo" ? ("＋ 할 일 쓰기", "클릭하면 바로 할 일로") : ("🎙 회의하기", "클릭 — 녹음 · 회의 내용 쓰기")
+    let (title, sub): (String, String)
+    switch kind {
+    case "tool:todo": (title, sub) = ("＋ 할 일 쓰기", "클릭하면 바로 할 일로")
+    case "tool:reload": (title, sub) = ("🔄 새로고침", "클릭 — 다시 읽고 처음부터 떨어뜨림")
+    default: (title, sub) = ("🎙 회의하기", "클릭 — 녹음 · 회의 내용 쓰기")
+    }
     let (f1, f2) = fonts(f)
     let w = max((title as NSString).size(withAttributes: [.font: f1]).width, (sub as NSString).size(withAttributes: [.font: f2]).width)
     let h = f1.ascender - f1.descender + f2.ascender - f2.descender + f * 0.3 + f * 1.1
@@ -455,8 +486,12 @@ func plog(_ m: String) {
     let f = home + "/.millie-obsidian/state/todo-pile.log"
     let line = "\(Date()) \(m)\n"
     if let a = try? FileManager.default.attributesOfItem(atPath: f), (a[.size] as? Int ?? 0) > 200_000 { try? FileManager.default.removeItem(atPath: f) }
-    if let h = FileHandle(forWritingAtPath: f) { h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); h.closeFile() }
-    else { FileManager.default.createFile(atPath: f, contents: line.data(using: .utf8)) }
+    if let h = FileHandle(forWritingAtPath: f) {
+        // 옛 API(seekToEndOfFile · write)는 실패하면 NSException 을 던져 타이머 콜백이 죽는다 — 던지지 않는 쪽으로
+        defer { try? h.close() }
+        _ = try? h.seekToEnd()
+        try? h.write(contentsOf: Data(line.utf8))
+    } else { FileManager.default.createFile(atPath: f, contents: Data(line.utf8)) }
 }
 
 final class PileSKView: SKView {
@@ -676,10 +711,18 @@ final class FormPanel: NSPanel {
 
 func label(_ s: String) -> NSTextField { let l = NSTextField(labelWithString: s); l.textColor = .secondaryLabelColor; return l }
 
-/// 할 일 추가 — 내용 · 프로젝트 · 중요도 · 마감 · 난이도를 다 정해야 들어간다 (vault_record.py todo).
+/// 여러 줄 입력칸 — 탭은 글자가 아니라 다음 칸으로 간다.
+final class FieldTextView: NSTextView {
+    override func insertTab(_ sender: Any?) { window?.selectNextKeyView(nil) }
+    override func insertBacktab(_ sender: Any?) { window?.selectPreviousKeyView(nil) }
+}
+
+/// 할 일 추가 — 제목 · 내용(선택) · 프로젝트 · 중요도 · 마감 · 난이도를 정해야 들어간다 (vault_record.py todo).
 final class AddForm: NSObject {
-    let panel = FormPanel(contentRect: NSRect(x: 0, y: 0, width: 460, height: 250), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-    let text = NSTextField()
+    let panel = FormPanel(contentRect: NSRect(x: 0, y: 0, width: 460, height: 350), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+    let text = NSTextField()                 // 제목 — 한 줄, 바탕화면 블록에 보이는 글자
+    let bodyView = FieldTextView()           // 내용 — 여러 줄, 할 일 줄 아래에 들여써서 붙는다
+    let bodyScroll = NSScrollView()
     let project = NSPopUpButton()
     let importance = NSSegmentedControl(labels: ["상", "중", "하"], trackingMode: .selectOne, target: nil, action: nil)
     let due = NSDatePicker()
@@ -692,6 +735,10 @@ final class AddForm: NSObject {
         panel.title = "할 일 추가"
         panel.level = .floating
         text.placeholderString = "무엇을 (끝났는지 알 수 있게)"
+        bodyView.isRichText = false; bodyView.font = .systemFont(ofSize: 13); bodyView.isAutomaticQuoteSubstitutionEnabled = false
+        bodyView.isAutomaticDashSubstitutionEnabled = false
+        bodyView.autoresizingMask = [.width]; bodyView.textContainerInset = NSSize(width: 4, height: 6)
+        bodyScroll.documentView = bodyView; bodyScroll.hasVerticalScroller = true; bodyScroll.borderType = .bezelBorder
         let prefs = loadPrefs()
         project.addItems(withTitles: vaultProjects())
         if project.itemTitles.contains(prefs.lastProject) { project.selectItem(withTitle: prefs.lastProject) }
@@ -701,7 +748,7 @@ final class AddForm: NSObject {
         err.textColor = .systemRed
         let add = NSButton(title: "추가", target: self, action: #selector(submit)); add.keyEquivalent = "\r"
         let grid = NSGridView(views: [
-            [label("내용"), text], [label("프로젝트"), project], [label("중요도"), importance],
+            [label("제목"), text], [label("내용"), bodyScroll], [label("프로젝트"), project], [label("중요도"), importance],
             [label("마감"), due], [label("난이도"), effort], [NSView(), err], [NSView(), add],
         ])
         grid.column(at: 0).xPlacement = .trailing
@@ -714,14 +761,17 @@ final class AddForm: NSObject {
             grid.leadingAnchor.constraint(equalTo: panel.contentView!.leadingAnchor, constant: 20),
             grid.trailingAnchor.constraint(equalTo: panel.contentView!.trailingAnchor, constant: -20),
             text.widthAnchor.constraint(equalToConstant: 320),
+            bodyScroll.widthAnchor.constraint(equalToConstant: 320),
+            bodyScroll.heightAnchor.constraint(equalToConstant: 90),
         ])
     }
 
     func show() { panel.center(); NSApp.activate(ignoringOtherApps: true); panel.makeKeyAndOrderFront(nil); panel.makeFirstResponder(text) }
 
     @objc func submit() {
-        let t = text.stringValue.trimmingCharacters(in: .whitespaces)
-        guard !t.isEmpty else { err.stringValue = "내용을 적어 주세요."; return }
+        let t = text.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { err.stringValue = "제목을 적어 주세요."; return }
+        let body = bodyView.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard importance.selectedSegment >= 0 else { err.stringValue = "중요도를 골라 주세요."; return }
         guard effort.selectedSegment >= 0 else { err.stringValue = "난이도를 골라 주세요."; return }
         guard let proj = project.titleOfSelectedItem else { err.stringValue = "프로젝트를 골라 주세요."; return }
@@ -730,6 +780,7 @@ final class AddForm: NSObject {
         p.arguments = [vaultRecord, "todo", "--project", proj, "--text", t,
                        "--importance", ["상", "중", "하"][importance.selectedSegment],
                        "--due", iso.string(from: due.dateValue), "--effort", ["⚡", "🔸", "🧱"][effort.selectedSegment]]
+            + (body.isEmpty ? [] : ["--body", body])
         let pipe = Pipe(); p.standardError = pipe; p.standardOutput = Pipe()
         do { try p.run() } catch { err.stringValue = "실행 실패: \(error.localizedDescription)"; return }
         p.waitUntilExit()
@@ -1037,7 +1088,7 @@ let vaultRecord = vaultRecordPath()
 /// "AI 로 수정하기" 첫 메시지 — vault 에서 Ghostty 로 연 claude 에게 보낸다. 수정사항은 다음 답변으로 준다.
 func editPrompt(_ it: Item) -> String {
     """
-    "\(it.text)" 항목 수정할거야. 수정사항은 다음 답변에서 줄게.
+    "\(it.text)" 항목 수정할거야. 수정사항은 다음 답변에서 줄게.\(bodyBlock(it))
     TODO 파일: \(latestTodoFile() ?? "-")
     원래 줄: \(it.raw)
     (줄 고치기 · 완료 · 버리기는 이 줄만 고친다. 프로젝트로 바꾸기 · 쪼개기는 vault-record 규칙대로 `python3 \(vaultRecord) …` 로 — 필요한 값은 나한테 묻고, 고치기 전에 바뀔 내용을 먼저 보여 줘)
@@ -1063,7 +1114,33 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var jiraNote = ""              // 마지막 Jira 가져오기 결과 (메뉴에 보인다)
 
     func everyItem() -> [Item] { loadItems() + loadJiraCache() }
-    func allItems() -> [Item] { let h = Set(loadPrefs().hidden ?? []); return everyItem().filter { !h.contains($0.raw) } }
+    func allItems() -> [Item] {
+        let h = Set(loadPrefs().hidden ?? []), active = activeProjects()
+        // 파일의 할 일은 진행 중 프로젝트 것만 — Store · 보관된 프로젝트와 프로젝트 없는 줄은 파일에 그대로 두고 블록 · 목록에서만 뺀다 (Jira · PR 은 프로젝트 칸이 달라 거르지 않는다)
+        return everyItem().filter { !h.contains($0.raw) && ($0.jiraKey != nil || isPRItem($0) || active.contains($0.project ?? "")) }
+    }
+
+    var prNote = ""                // 마지막 PR 가져오기 결과 (새로고침 메뉴에 보인다)
+    var prSyncing = false
+    /// 내게 리뷰 요청된 PR 을 TODO 파일에 쌓는다 (평소엔 launchd 가 2분마다 · 새로고침은 바로). 파일이 바뀌었으면 블록에 반영.
+    func pullPRs() {
+        let script = vaultPath() + "/.scripts/pr_todo_sync.py"
+        guard !prSyncing, env["PILE_NO_PR"] == nil, FileManager.default.fileExists(atPath: script) else { return }
+        prSyncing = true
+        DispatchQueue.global().async { [weak self] in
+            let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/python3"); p.arguments = [script]
+            let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe
+            var note = "PR 조회 실패"
+            do {
+                try p.run()
+                let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                p.waitUntilExit()
+                note = p.terminationStatus != 0 ? "PR 조회 실패" : (out.isEmpty ? "PR 변동 없음" : "PR 갱신")
+                plog("PR 동기화 \(note) \(out.trimmingCharacters(in: .whitespacesAndNewlines))")
+            } catch { plog("PR 동기화 실행 실패: \(error)") }
+            DispatchQueue.main.async { self?.prNote = note; self?.prSyncing = false; self?.refreshIfChanged() }
+        }
+    }
 
     /// Jira 를 가져와 바뀌었으면 블록에 반영 (10분마다 · 새로고침 · 연결 직후).
     func pullJira() {
@@ -1081,7 +1158,25 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         plog("새 빌드 — 다시 켬"); exit(75)
     }
 
+    /// 메뉴바 앱(.accessory)은 기본 메뉴가 없어 ⌘V · ⌘C · ⌘X · ⌘A · ⌘Z 가 입력칸에 안 닿는다 — 보이지 않는 편집 메뉴를 달아 준다.
+    func installEditMenu() {
+        let main = NSMenu()
+        main.addItem(NSMenuItem())                       // 첫 칸은 앱 메뉴 자리
+        let editItem = NSMenuItem(); main.addItem(editItem)
+        let edit = NSMenu(title: "편집"); editItem.submenu = edit
+        edit.addItem(withTitle: "실행 취소", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = edit.addItem(withTitle: "다시 실행", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "잘라내기", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "복사", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "붙여넣기", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "모두 선택", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        NSApp.mainMenu = main
+    }
+
     func applicationDidFinishLaunching(_ n: Notification) {
+        installEditMenu()
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         let menu = NSMenu(); menu.delegate = self
         status.menu = menu
@@ -1112,8 +1207,9 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if s.dragNode != nil { w.ignoresMouseEvents = false; return }
         let p = v.convert(w.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
         let ignore = s.block(at: s.convertPoint(fromView: p)) == nil
-        if ignore != w.ignoresMouseEvents { plog("hover \(ignore ? "off" : "on") at \(NSEvent.mouseLocation)") }
-        w.ignoresMouseEvents = ignore
+        let changed = ignore != w.ignoresMouseEvents
+        w.ignoresMouseEvents = ignore      // 로그보다 먼저 — 로그가 실패해도 클릭 전환은 일어난다
+        if changed { plog("hover \(ignore ? "off" : "on") at \(NSEvent.mouseLocation)") }
     }
 
     /// 메뉴바가 있는 기본 모니터에, 바탕화면 아이콘 바로 위 층 창 하나 (앱 창보다는 아래).
@@ -1123,8 +1219,8 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     func refreshIfChanged() { let s = fileStamp(); if s != stamp { plog("TODO 파일 바뀜 → 다시 읽음"); refresh() } }
 
-    /// 새로고침 — TODO 를 다시 읽고 블록을 처음부터 다시 떨어뜨린다 (멈췄거나 꼬였을 때).
-    @objc func reload() { plog("새로고침"); rebuild(); pullJira() }
+    /// 새로고침 — TODO 를 다시 읽고 블록을 처음부터 다시 떨어뜨린다 (멈췄거나 꼬였을 때). Jira · 리뷰 요청 PR 도 바로 가져온다.
+    @objc func reload() { plog("새로고침"); rebuild(); pullJira(); pullPRs() }
 
     func rebuild() {
         window?.orderOut(nil)
@@ -1153,7 +1249,13 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         items = allItems()
         pile?.sync(items) { s in
             s.onMenu = { [weak self] raw, e in self?.contextMenu(raw, e) }
-            s.onTool = { [weak self] kind in kind == "tool:todo" ? self?.addTodo() : self?.meeting() }
+            s.onTool = { [weak self] kind in
+                switch kind {
+                case "tool:todo": self?.addTodo()
+                case "tool:reload": DispatchQueue.main.async { self?.reload() }   // 새로고침은 창을 새로 만들므로 클릭 처리가 끝난 뒤에
+                default: self?.meeting()
+                }
+            }
         }
         let late = items.filter { ($0.late ?? 0) > 0 }.count
         let jira = items.filter { $0.jiraKey != nil }.count
@@ -1214,7 +1316,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for it in sorted.prefix(30) {
             let mark = (it.jiraKey != nil ? "🎫 " : "") + (it.late.map { $0 > 0 ? "🔴 \($0)일 지남" : ($0 == 0 ? "🟠 오늘까지" : ($0 == -1 ? "🟠 내일까지" : "📅 \(-$0)일 남음")) } ?? "⚪︎ \(it.age)일째")
             let mi = NSMenuItem(title: "\(mark)  " + (it.text.count > 46 ? String(it.text.prefix(46)) + "…" : it.text), action: nil, keyEquivalent: "")
-            mi.toolTip = (it.project.map { "[\($0)] " } ?? "") + it.text
+            mi.toolTip = (it.project.map { "[\($0)] " } ?? "") + it.text + (it.body.isEmpty ? "" : "\n" + it.body)
             mi.submenu = actions(for: it)
             menu.addItem(mi)
         }
@@ -1403,7 +1505,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         let prompt = """
         vault TODO 를 해결하자.
-        할 일: \(it.text)
+        할 일: \(it.text)\(bodyBlock(it))
         프로젝트: \(proj) · \(meta(it))
         TODO 파일의 원래 줄: \(it.raw)
         먼저 무엇이 끝나야 완료인지 한 줄로 정하고 시작해. 끝나면 TODO 줄을 [x] 로 바꿔도 되는지 물어봐.
